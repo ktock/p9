@@ -878,6 +878,11 @@ func (t *txattrwalk) handle(cs *connState) message {
 	}
 	defer ref.DecRef()
 
+	if t.Name == "" {
+		// return empty on list instead of error
+		return &rxattrwalk{}
+	}
+
 	// We don't support extended attributes.
 	return newErr(linux.ENODATA)
 }

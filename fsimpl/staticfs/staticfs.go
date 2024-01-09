@@ -44,6 +44,24 @@ func WithFile(name, content string) Option {
 	}
 }
 
+// WithFile includes the file named name with file contents content in the file system.
+func WithFileMode(name, content string, mode p9.FileMode) Option {
+	return func(a *attacher) error {
+		if strings.Contains(name, "/") {
+			return fmt.Errorf("directories are not supported by simplefs")
+		}
+		if _, ok := a.files[name]; ok {
+			return fmt.Errorf("file named %q already exists", name)
+		}
+		m := mode
+		a.fileModes[name] = &m
+		a.files[name] = content
+		a.names = append(a.names, name)
+		sort.Strings(a.names)
+		return nil
+	}
+}
+
 // New creates a new read-only static file system defined by the files passed
 // with opts.
 //
@@ -51,6 +69,7 @@ func WithFile(name, content string) Option {
 func New(opts ...Option) (p9.Attacher, error) {
 	a := &attacher{
 		files: make(map[string]string),
+		fileModes: make(map[string]*p9.FileMode),
 		qids:  &p9.QIDGenerator{},
 	}
 	for _, o := range opts {
@@ -64,6 +83,8 @@ func New(opts ...Option) (p9.Attacher, error) {
 type attacher struct {
 	// files maps filenames to file contents.
 	files map[string]string
+
+	fileModes map[string]*p9.FileMode
 
 	// names is a sorted list of the keys of files.
 	names []string
@@ -122,8 +143,13 @@ func (d *dir) Walk(names []string) ([]p9.QID, p9.File, error) {
 		if !ok {
 			return nil, nil, linux.ENOENT
 		}
+		mode, _ := d.a.fileModes[names[0]]
 		qid := d.a.qids.Get(p9.TypeRegular)
-		return []p9.QID{qid}, ReadOnlyFile(content, qid), nil
+		f := ReadOnlyFile(content, qid)
+		if mode != nil {
+			f = ReadOnlyFileWithMode(content, qid, *mode)
+		}
+		return []p9.QID{qid}, f, nil
 	default:
 		return nil, nil, linux.ENOENT
 	}
@@ -173,6 +199,14 @@ func ReadOnlyFile(content string, qid p9.QID) p9.File {
 	}
 }
 
+func ReadOnlyFileWithMode(content string, qid p9.QID, mode p9.FileMode) p9.File {
+	return &file{
+		Reader: strings.NewReader(content),
+		qid:    qid,
+		mode:   &mode,
+	}
+}
+
 // file is a read-only file.
 type file struct {
 	statfs
@@ -184,6 +218,8 @@ type file struct {
 	templatefs.NoopRenamed
 
 	*strings.Reader
+
+	mode *p9.FileMode
 
 	qid p9.QID
 }
@@ -206,8 +242,12 @@ func (f *file) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
 
 // GetAttr implements p9.File.GetAttr.
 func (f *file) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, error) {
+	m := p9.FileMode(0666)
+	if f.mode != nil {
+		m = *f.mode
+	}
 	return f.qid, req, p9.Attr{
-		Mode:      p9.ModeRegular | 0666,
+		Mode:      p9.ModeRegular | m,
 		UID:       0,
 		GID:       0,
 		NLink:     0,
